@@ -12,6 +12,8 @@ import edu.berkeley.cs186.database.memory.BufferManager;
 import edu.berkeley.cs186.database.memory.Page;
 import edu.berkeley.cs186.database.table.RecordId;
 
+import static edu.berkeley.cs186.database.index.BTreeUtils.*;
+
 /**
  * A inner node of a B+ tree. Every inner node in a B+ tree of order d stores
  * between d and 2d keys. An inner node with n keys stores n + 1 "pointers" to
@@ -79,8 +81,8 @@ class InnerNode extends BPlusNode {
     @Override
     public LeafNode get(DataBox key) {
         // TODO(proj2): implement
-
-        return null;
+        int idx = insertIdxRight(keys, key);
+        return getChild(idx).get(key);
     }
 
     // See BPlusNode.getLeftmostLeaf.
@@ -88,16 +90,36 @@ class InnerNode extends BPlusNode {
     public LeafNode getLeftmostLeaf() {
         assert(children.size() > 0);
         // TODO(proj2): implement
-
-        return null;
+        return getChild(0).getLeftmostLeaf();
     }
 
     // See BPlusNode.put.
     @Override
-    public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) {
+    public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) throws BPlusTreeException {
         // TODO(proj2): implement
-
-        return Optional.empty();
+        int insertIdx = insertIdxRight(keys, key);
+        Optional<Pair<DataBox, Long>> pairOption;
+        pairOption = getChild(insertIdx).put(key, rid);  // exception may be rethrown here
+        if (!pairOption.isPresent()) {
+            sync();
+            return Optional.empty();
+        }
+        Pair<DataBox, Long> pair = pairOption.get();
+        DataBox newKey = pair.getFirst();
+        long pageNum = pair.getSecond();
+        insertIdx = insertIdxRight(keys, newKey);
+        keys.add(insertIdx, newKey);
+        children.add(insertIdx+1, pageNum);
+        int order = metadata.getOrder();
+        if (keys.size() <= 2 * order) {
+            sync();
+            return Optional.empty();
+        }
+        Pair<InnerNode, DataBox> siblingSplitKeyPair = splitAndCreateSibling();
+        sync();
+        InnerNode sibling = siblingSplitKeyPair.getFirst();
+        DataBox splitKey = siblingSplitKeyPair.getSecond();
+        return Optional.of(new Pair<>(splitKey, sibling.getPage().getPageNum()));
     }
 
     // See BPlusNode.bulkLoad.
@@ -105,16 +127,50 @@ class InnerNode extends BPlusNode {
     public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data,
             float fillFactor) {
         // TODO(proj2): implement
-
+        BPlusNode rightMostNode;
+        int order = metadata.getOrder();
+        int threshold = order * 2;
+        while (data.hasNext() && keys.size() <= threshold) {
+            rightMostNode = getChild(children.size()-1);
+            Optional<Pair<DataBox, Long>> pairOption = rightMostNode.bulkLoad(data, fillFactor);
+            if (pairOption.isPresent()) {
+                Pair<DataBox, Long> splitKeyPageNumPair = pairOption.get();
+                DataBox splitKey = splitKeyPageNumPair.getFirst();
+                long child = splitKeyPageNumPair.getSecond();
+                keys.add(splitKey);
+                children.add(child);
+            }
+        }
+        if (keys.size() > threshold) {
+            // split
+            Pair<InnerNode, DataBox> siblingSplitKeyPair = splitAndCreateSibling();
+            InnerNode siblingNode = siblingSplitKeyPair.getFirst();
+            DataBox splitKey = siblingSplitKeyPair.getSecond();
+            sync();
+            return Optional.of(new Pair<>(splitKey, siblingNode.page.getPageNum()));
+        }
+        sync();
         return Optional.empty();
+    }
+
+    private Pair<InnerNode, DataBox> splitAndCreateSibling() {
+        int order = metadata.getOrder();
+        DataBox splitKey = keys.remove(order);
+        List<DataBox> siblingKeys = new ArrayList<>(order);
+        List<Long> siblingChildren = new ArrayList<>(order);
+        while (keys.size() > order) {
+            siblingKeys.add(keys.remove(order));
+            siblingChildren.add(children.remove(order+1));
+        }
+        siblingChildren.add(children.remove(order+1));
+        return new Pair<> (new InnerNode(metadata, bufferManager, siblingKeys, siblingChildren, treeContext), splitKey);
     }
 
     // See BPlusNode.remove.
     @Override
     public void remove(DataBox key) {
         // TODO(proj2): implement
-
-        return;
+        getChild(insertIdxRight(keys, key)).remove(key);
     }
 
     // Helpers /////////////////////////////////////////////////////////////////
